@@ -79,7 +79,7 @@ table.tt td.emp{background:var(--soft);cursor:pointer}table.tt td.emp:hover{back
 table.tt td.les{cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06)}
 table.tt td.sel{outline:3px solid var(--acc);outline-offset:-3px}
 table.tt.sm{min-width:0}table.tt.sm td{height:54px;font-size:11px}
-.pt b{font-weight:800}.pt+.pt{border-top:1px dashed rgba(0,0,0,.25);margin-top:3px;padding-top:3px}.pt i{color:#3d4e47}
+.pt b{font-weight:800}.pt .gl{display:block;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.3px;color:#0b6b50}.pt+.pt{border-top:1px dashed rgba(0,0,0,.25);margin-top:3px;padding-top:3px}.pt i{color:#3d4e47}
 .lk{float:right;opacity:.7}.lk svg{width:12px;height:12px}
 .selbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--warn-l);border:1px solid color-mix(in srgb,var(--acc) 60%,transparent);border-radius:12px;padding:10px;margin:10px 0}
 #toast{position:fixed;left:50%;bottom:calc(var(--nav) + env(safe-area-inset-bottom) + 16px);transform:translate(-50%,30px);background:#17332a;color:#fff;padding:12px 18px;border-radius:14px;opacity:0;transition:.25s;max-width:92%;z-index:30;pointer-events:none;font-weight:600;box-shadow:0 8px 24px rgba(0,0,0,.25)}
@@ -638,21 +638,43 @@ function makeProblem(E) {
   }
   const S = [];
   for (const [key, ls] of clusters) {
-    const h = +ls[0].h, blk = +ls[0].blk >= 2 ? 2 : 1;
-    if (ls.some(x => +x.h !== h)) warns.push('Groupe « ' + ls[0].grp + ' » : heures différentes entre les lignes, ' + h + ' h retenues.');
-    const n2 = blk === 2 ? Math.floor(h / 2) : 0, rem = h - 2 * n2, lens = [...Array(n2).fill(2), ...Array(rem).fill(1)];
-    const classes = [...new Set(ls.map(x => x.c))], teachers = [...new Set(ls.map(x => x.t))];
-    const pref = (ls.find(x => x.pref) || {}).pref || '', bans = new Set();
+    const gname = ls[0].grp, pref = (ls.find(x => x.pref) || {}).pref || '', bans = new Set();
     ls.forEach(x => (x.ban || []).forEach(b => bans.add(b)));
-    const fixedUsed = new Set();
-    const parts = ls.map(x => {
+    // Libellés : saisis, sinon « Groupe n » par classe quand la classe est divisée
+    const labs = {}, perC = {};
+    ls.forEach(x => (perC[x.c] = perC[x.c] || []).push(x));
+    Object.values(perC).forEach(arr => arr.forEach((x, n) => { labs[x.id] = (x.gl || '').trim() || (arr.length > 1 ? 'Groupe ' + (n + 1) : ''); }));
+    // Fusion : même enseignant + même matière dans plusieurs classes = un seul cours commun, une seule salle
+    const mk = (x) => {
       const sub = nz(x.subj), ded = E.rooms.filter(r => (r.only || '').split(',').map(nz).includes(sub)), need = E.rooms.length > 0 && !x.noRoom && (ded.length > 0 || !noRoomSub.test(sub)); let allowed = [];
       if (need) { allowed = (ded.length ? ded : E.rooms.filter(r => !(r.only || '').trim())).map(r => r.id); }
-      const fr = cls[x.c].room; if (need && !ded.length && fr && !fixedUsed.has(fr) && E.rooms.some(r => r.id === fr)) { allowed = [fr]; fixedUsed.add(fr); }
-      return { lid: x.id, t: x.t, c: x.c, subj: x.subj, need, allowed };
-    });
-    const cap = Math.max(1, Math.ceil(lens.length / nOpen));
-    lens.forEach((len, i) => S.push({ id: key + '#' + i, ck: key, len, classes, teachers, parts, pref, bans, cap }));
+      return { lid: x.id, lids: [x.id], t: x.t, c: x.c, cs: [x.c], subj: x.subj, lab: labs[x.id], need, allowed, ded: ded.length > 0, h: +x.h, blk: +x.blk >= 2 ? 2 : 1 };
+    };
+    const merged = [];
+    for (const x of ls) {
+      const m = gname && merged.find(p => p.t === x.t && nz(p.subj) === nz(x.subj) && !p.cs.includes(x.c));
+      if (m) { m.cs.push(x.c); m.lids.push(x.id); m.h = Math.max(m.h, +x.h); if (labs[x.id] && !m.lab) m.lab = labs[x.id]; if (+x.h !== +ls.find(y => y.id === m.lid).h) warns.push('Groupe « ' + gname + ' » : ' + x.subj + ' n\'a pas le même nombre d\'heures dans toutes les classes, ' + m.h + ' h retenues.'); }
+      else merged.push(mk(x));
+    }
+    const fixedUsed = new Set();
+    merged.forEach(p => { if (p.cs.length !== 1 || !p.need || p.ded) return; const fr = cls[p.c].room; if (fr && !fixedUsed.has(fr) && E.rooms.some(r => r.id === fr)) { p.allowed = [fr]; fixedUsed.add(fr); } });
+    if (gname) {
+      const seenT = {}; merged.forEach(p => { if (seenT[p.t] && seenT[p.t] !== p.subj) warns.push('⚠ Groupe « ' + gname + ' » : ' + tch[p.t].name + ' a deux cours différents en même temps (' + seenT[p.t] + ' et ' + p.subj + ').'); seenT[p.t] = p.subj; });
+      const hs = [...new Set(merged.map(p => p.h))].sort((a, b) => a - b);
+      if (hs.length > 1) warns.push('Groupe « ' + gname + ' » : heures différentes (' + merged.map(p => p.subj + ' ' + p.h + ' h').join(', ') + ') ; ' + hs[0] + ' h en même temps, le reste placé avec les seuls cours concernés.');
+    }
+    // Tranches d'heures : chaque tranche réunit les cours qui ont encore des heures
+    const levels = [...new Set(merged.map(p => p.h))].sort((a, b) => a - b), segs = []; let prev = 0;
+    for (const lv of levels) {
+      const parts = merged.filter(p => p.h >= lv).map(p => Object.assign({}, p)), h = lv - prev; prev = lv;
+      const blk = parts[0].blk, n2 = blk === 2 ? Math.floor(h / 2) : 0, rem = h - 2 * n2;
+      segs.push({ parts, lens: [...Array(n2).fill(2), ...Array(rem).fill(1)] });
+    }
+    const cap = Math.max(1, Math.ceil(segs.reduce((a, g) => a + g.lens.length, 0) / nOpen)); let i = 0;
+    for (const g of segs) {
+      const classes = [...new Set(g.parts.flatMap(p => p.cs))], teachers = [...new Set(g.parts.map(p => p.t))];
+      g.lens.forEach(len => S.push({ id: key + '#' + (i++), ck: key, len, classes, teachers, parts: g.parts, pref, bans, cap }));
+    }
   }
   return { E, nd, ns, openDay, closed, S, cls, tch, warns, starts: E.slots.map(s => slotStart(s.l)) };
 }
@@ -1004,7 +1026,7 @@ function dl(name, text, type) { return saveFile(name, text, type || 'application
 function backup() { dl('emplois-du-temps-sauvegarde.json', JSON.stringify(D), 'application/json'); toast('Fichier de sauvegarde créé'); }
 function importFile(f) { if (!f) return; const r = new FileReader(); r.onload = () => { try { D = fix(JSON.parse(r.result)); sv(); render(); toast('Sauvegarde chargée'); } catch (e) { toast('Fichier invalide', 1); } }; r.readAsText(f); $('imp').value = ''; }
 /* ---------- 2 Enseignants ---------- */
-function hoursOf(tid) { return D.lessons.filter(l => l.t === tid).reduce((a, l) => a + (+l.h || 0), 0); }
+function hoursOf(tid) { const seen = new Set(); return D.lessons.filter(l => l.t === tid).reduce((a, l) => { if (l.grp && l.grp.trim()) { const k = nz(l.grp) + '|' + nz(l.subj); if (seen.has(k)) return a; seen.add(k); } return a + (+l.h || 0); }, 0); }
 function teachList() {
   const q = nz(TQ), list = D.teachers.filter(t => !q || nz(t.name).includes(q));
   if (!list.length) return '<p class="hint">Aucun enseignant ne correspond.</p>';
@@ -1034,14 +1056,52 @@ function tLessons() {
   const T = D.teachers.map(t => [t.id, t.name]), C = D.classes.map(c => [c.id, c.name]);
   if (LF && !D.teachers.some(t => t.id === LF)) LF = '';
   const rawO = arr => arr.map(a => `<option value="${a[0]}">${esc(a[1])}</option>`).join(''), TO = rawO(T), CO = rawO(C), pick = (o, cur) => o.replace('value="' + cur + '"', 'value="' + cur + '" selected'), rows = LF ? D.lessons.filter(l => l.t === LF) : D.lessons;
-  let h = `<section><h2>Cours à programmer (${rows.length}${LF ? ' sur ' + D.lessons.length : ''})</h2><div class="row"><label>Filtrer par enseignant<select onchange="LF=this.value;render()"><option value="">Tous</option>${opt(T, LF)}</select></label></div><p class="hint"><b>Groupe</b> : les lignes qui portent le même nom de groupe sont programmées en même temps, chacune avec son enseignant et sa propre salle (exemple LV2 : Espagnol et Arabe de la 4ème en groupe « LV2 4ème »). <b>Bloc 2</b> : cours donnés par séances de 2 h.</p><datalist id="sj">${subs.map(s => `<option value="${esc(s)}">`).join('')}</datalist><div class="sc"><table class="t wide cards"><tr><th>Enseignant</th><th>Matière</th><th>Classe</th><th>H/sem</th><th>Bloc</th><th>Moment</th><th>Groupe</th><th>Sans salle</th><th></th></tr>` +
-    rows.map(l => `<tr><td data-l="Enseignant"><select onchange="U('lessons','${l.id}','t',this.value)">${pick(TO, l.t)}</select></td><td data-l="Matière"><input list="sj" value="${esc(l.subj)}" onchange="U('lessons','${l.id}','subj',this.value)"></td><td data-l="Classe"><select onchange="U('lessons','${l.id}','c',this.value)">${pick(CO, l.c)}</select></td><td data-l="Heures / sem"><input type="number" min="1" max="12" class="n" value="${l.h}" onchange="U('lessons','${l.id}','h',this.value,1)"></td><td data-l="Bloc"><select onchange="U('lessons','${l.id}','blk',+this.value)">${opt([[1, '1 h'], [2, '2 h']], +l.blk)}</select></td><td data-l="Moment"><select onchange="U('lessons','${l.id}','pref',this.value)">${opt([['', 'Indifférent'], ['M', 'Matin'], ['A', 'Après-midi']], l.pref || '')}</select></td><td data-l="Groupe"><input value="${esc(l.grp || '')}" onchange="U('lessons','${l.id}','grp',this.value)"></td><td data-l="Sans salle"><input type="checkbox" ${l.noRoom ? 'checked' : ''} onchange="U('lessons','${l.id}','noRoom',this.checked)"></td><td data-l=""><button class="x" onclick="D.lessons=D.lessons.filter(x=>x.id!=='${l.id}');sv();render()">✕</button></td></tr>`).join('') +
+  let h = `<section><h2>Cours à programmer (${rows.length}${LF ? ' sur ' + D.lessons.length : ''})</h2><div class="row"><label>Filtrer par enseignant<select onchange="LF=this.value;render()"><option value="">Tous</option>${opt(T, LF)}</select></label></div><p class="hint"><b>Groupe</b> : les lignes qui portent le même nom de groupe sont programmées en même temps, chacune avec son enseignant et sa propre salle. <b>Libellé</b> : nom du sous-groupe affiché sur l'emploi du temps (vide = « Groupe 1 », « Groupe 2 »…). <b>Bloc 2</b> : cours donnés par séances de 2 h. Pour créer un groupe plus simplement, utilisez la section « Groupes simultanés » plus bas.</p><datalist id="sj">${subs.map(s => `<option value="${esc(s)}">`).join('')}</datalist><div class="sc"><table class="t wide cards"><tr><th>Enseignant</th><th>Matière</th><th>Classe</th><th>H/sem</th><th>Bloc</th><th>Moment</th><th>Groupe</th><th>Libellé</th><th>Sans salle</th><th></th></tr>` +
+    rows.map(l => `<tr><td data-l="Enseignant"><select onchange="U('lessons','${l.id}','t',this.value)">${pick(TO, l.t)}</select></td><td data-l="Matière"><input list="sj" value="${esc(l.subj)}" onchange="U('lessons','${l.id}','subj',this.value)"></td><td data-l="Classe"><select onchange="U('lessons','${l.id}','c',this.value)">${pick(CO, l.c)}</select></td><td data-l="Heures / sem"><input type="number" min="1" max="12" class="n" value="${l.h}" onchange="U('lessons','${l.id}','h',this.value,1)"></td><td data-l="Bloc"><select onchange="U('lessons','${l.id}','blk',+this.value)">${opt([[1, '1 h'], [2, '2 h']], +l.blk)}</select></td><td data-l="Moment"><select onchange="U('lessons','${l.id}','pref',this.value)">${opt([['', 'Indifférent'], ['M', 'Matin'], ['A', 'Après-midi']], l.pref || '')}</select></td><td data-l="Groupe"><input value="${esc(l.grp || '')}" onchange="U('lessons','${l.id}','grp',this.value)"></td><td data-l="Libellé"><input value="${esc(l.gl || '')}" placeholder="auto" onchange="U('lessons','${l.id}','gl',this.value)"></td><td data-l="Sans salle"><input type="checkbox" ${l.noRoom ? 'checked' : ''} onchange="U('lessons','${l.id}','noRoom',this.checked)"></td><td data-l=""><button class="x" onclick="D.lessons=D.lessons.filter(x=>x.id!=='${l.id}');sv();render()">✕</button></td></tr>`).join('') +
     `</table></div><div class="btns"><button onclick="addLesson()">+ Cours</button></div></section>`;
-  h += `<section><h2>Ajout rapide</h2><p class="hint">Une ligne par cours : <code>Enseignant; Matière; Classes; Heures</code>, puis au besoin <code>bloc2</code>, <code>matin</code>, <code>après-midi</code>, <code>groupe=LV2*</code> (l'étoile crée un groupe distinct par classe), <code>sans salle</code>. Classes : noms séparés par des virgules, ou « toutes ».</p><textarea id="qa" rows="5" placeholder="M. Diop; Maths; 6ème A, 6ème B; 4; matin&#10;M. Diallo; EPS; toutes; 2; sans salle"></textarea><div class="btns"><button onclick="quickAdd()">Ajouter ces cours</button></div></section>`;
+  h += groupsHTML();
+  h += `<section><h2>Ajout rapide</h2><p class="hint">Une ligne par cours : <code>Enseignant; Matière; Classes; Heures</code>, puis au besoin <code>bloc2</code>, <code>matin</code>, <code>après-midi</code>, <code>groupe=LV2*</code> (l'étoile crée un groupe distinct par classe), <code>libellé=Groupe 1</code>, <code>sans salle</code>. Classes : noms séparés par des virgules, ou « toutes ».</p><textarea id="qa" rows="5" placeholder="M. Diop; Maths; 6ème A, 6ème B; 4; matin&#10;M. Diallo; EPS; toutes; 2; sans salle"></textarea><div class="btns"><button onclick="quickAdd()">Ajouter ces cours</button></div></section>`;
   const { E } = compile(D), P = makeProblem(E), pre = precheck(P);
   h += `<section><h2>Contrôle de faisabilité</h2>${pre.length ? '<ul>' + pre.map(x => `<li class="${/⚠|impossible|pour \d+ créneaux|aucune|manque/i.test(x) && !/^Salles :/.test(x) ? 'bad' : ''}">${esc(x)}</li>`).join('') + '</ul>' : '<p>Rien à signaler.</p>'}</section>`;
   return h;
 }
+/* ---------- Groupes simultanés (LV2, matières facultatives) ---------- */
+let GF = null;
+const gfNew = () => ({ name: '', cls: [], per: false, blk: 1, pref: '', rows: [{ lab: 'Groupe 1', subj: '', t: '', h: 2 }, { lab: 'Groupe 2', subj: '', t: '', h: 2 }] });
+function groupsHTML() {
+  if (!GF) GF = gfNew();
+  const gs = new Map(); D.lessons.forEach(l => { const g = (l.grp || '').trim(); if (!g) return; const k = nz(g); if (!gs.has(k)) gs.set(k, { name: g, ls: [] }); gs.get(k).ls.push(l); });
+  const tn = id => (byId(D.teachers, id) || {}).name || '?', cn = id => (byId(D.classes, id) || {}).name || '?';
+  let h = `<section><h2>Groupes simultanés (${gs.size})</h2><p class="hint">Pour les LV2 et les matières facultatives : la classe est séparée en groupes qui ont cours <b>en même temps</b>, chacun avec son enseignant et sa salle. Si un enseignant prend plusieurs classes ensemble pour la même matière, une seule salle est réservée. Si les heures diffèrent, les heures communes sont placées en même temps et le reste à part.</p>`;
+  if (gs.size) h += '<div class="sc"><table class="t"><tr><th>Groupe</th><th>Composition</th><th></th></tr>' + [...gs.values()].map(g => `<tr><td><b>${esc(g.name)}</b></td><td>${g.ls.map(l => `${l.gl ? esc(l.gl) + ' : ' : ''}${esc(l.subj)} · ${esc(tn(l.t))} · ${esc(cn(l.c))} · ${+l.h} h`).join('<br>')}</td><td><button class="sm sec" data-g="${esc(g.name)}" onclick="ungroup(this.dataset.g)">Dissoudre</button></td></tr>`).join('') + '</table></div>';
+  const TO = D.teachers.map(t => [t.id, t.name]), opt = (arr, cur) => arr.map(a => `<option value="${a[0]}" ${cur === a[0] ? 'selected' : ''}>${esc(a[1])}</option>`).join('');
+  h += `<details ${GF.open ? 'open' : ''} ontoggle="GF.open=this.open"><summary>Créer un groupe</summary>
+  <div class="row"><label>Nom du groupe<input value="${esc(GF.name)}" placeholder="LV2, Facultatif…" onchange="GF.name=this.value"></label><label>Séances<select onchange="GF.blk=+this.value">${opt([[1, '1 h'], [2, '2 h']], GF.blk)}</select></label><label>Moment<select onchange="GF.pref=this.value">${opt([['', 'Indifférent'], ['M', 'Matin'], ['A', 'Après-midi']], GF.pref)}</select></label></div>
+  <p class="hint" style="margin-top:12px">Classes concernées</p><div class="chips">${D.classes.map(c => `<label class="chip"><input type="checkbox" ${GF.cls.includes(c.id) ? 'checked' : ''} onchange="gfCls('${c.id}',this.checked)">${esc(c.name)}</label>`).join('')}</div>
+  <label class="chip" style="margin-top:10px;display:inline-flex"><input type="checkbox" ${GF.per ? 'checked' : ''} onchange="GF.per=this.checked">Un groupe distinct par classe</label>
+  <p class="hint">Coché : chaque classe a son propre créneau (ex. LV2 4ème A, LV2 4ème B). Décoché : toutes les classes choisies ont le groupe au même moment, ce qui permet de mélanger leurs élèves.</p>
+  <div class="sc"><table class="t"><tr><th>Libellé</th><th>Matière</th><th>Enseignant</th><th>H/sem</th><th></th></tr>${GF.rows.map((r, i) => `<tr><td><input value="${esc(r.lab)}" onchange="GF.rows[${i}].lab=this.value"></td><td><input list="sj" value="${esc(r.subj)}" placeholder="Arabe, Espagnol…" onchange="GF.rows[${i}].subj=this.value"></td><td><select onchange="GF.rows[${i}].t=this.value"><option value="">— choisir —</option>${opt(TO, r.t)}</select></td><td><input type="number" class="n" min="1" max="12" value="${r.h}" onchange="GF.rows[${i}].h=+this.value||0"></td><td>${GF.rows.length > 1 ? `<button class="x" onclick="GF.rows.splice(${i},1);render()">✕</button>` : ''}</td></tr>`).join('')}</table></div>
+  <div class="btns"><button class="sec" onclick="GF.rows.push({lab:'Groupe '+(GF.rows.length+1),subj:'',t:'',h:GF.rows[GF.rows.length-1].h});render()">+ Sous-groupe</button><button onclick="createGroup()">Créer le groupe</button></div></details></section>`;
+  return h;
+}
+function gfCls(id, on) { GF.cls = GF.cls.filter(x => x !== id); if (on) GF.cls.push(id); }
+function createGroup() {
+  const name = (GF.name || '').trim(), rows = GF.rows.filter(r => (r.subj || '').trim());
+  if (!name) { toast('Donnez un nom au groupe', 1); return; }
+  if (!GF.cls.length) { toast('Choisissez au moins une classe', 1); return; }
+  if (!rows.length) { toast('Ajoutez au moins une matière', 1); return; }
+  if (rows.some(r => !byId(D.teachers, r.t) || !(+r.h > 0))) { toast('Chaque ligne doit avoir un enseignant et des heures', 1); return; }
+  const tids = rows.map(r => r.t + '|' + nz(r.subj)), ts = rows.map(r => r.t);
+  if (ts.some((t, i) => ts.indexOf(t) !== i && tids.indexOf(tids[i]) === i)) { toast('Un enseignant ne peut pas avoir deux matières différentes dans le même groupe', 1); return; }
+  const cls = D.classes.filter(c => GF.cls.includes(c.id)), names = new Set(D.lessons.map(l => nz(l.grp || '')).filter(Boolean));
+  const gname = c => GF.per && cls.length > 1 ? name + ' ' + c.name : name;
+  const clash = cls.map(gname).find(g => names.has(nz(g)));
+  if (clash && !confirm('Le groupe « ' + clash + ' » existe déjà. Ajouter ces cours à ce groupe ?')) return;
+  let n = 0;
+  cls.forEach(c => rows.forEach(r => { D.lessons.push({ id: uid(), t: r.t, subj: r.subj.trim(), c: c.id, h: +r.h, blk: GF.blk, pref: GF.pref, noRoom: false, grp: gname(c), gl: (r.lab || '').trim() }); n++; }));
+  sv(); GF = gfNew(); render(); toast(n + ' cours ajoutés en groupe simultané');
+}
+function ungroup(g) { if (!confirm('Dissoudre le groupe « ' + g + ' » ? Les cours sont gardés mais ne seront plus programmés en même temps.')) return; D.lessons.forEach(l => { if (nz(l.grp || '') === nz(g)) { l.grp = ''; l.gl = ''; } }); sv(); render(); }
 function addLesson() { if (!D.teachers.length || !D.classes.length) { toast('Ajoutez d\'abord un enseignant et une classe', 1); return; } D.lessons.push({ id: uid(), t: D.teachers[0].id, subj: 'Matière', c: D.classes[0].id, h: 2, blk: 1, pref: '', noRoom: false, grp: '' }); sv(); render(); }
 function quickAdd() {
   const bad = []; let n = 0;
@@ -1050,8 +1110,8 @@ function quickAdd() {
     if (p.length < 4) { bad.push(raw); return; }
     let t = D.teachers.find(x => nz(x.name) === nz(p[0])); if (!t) { t = { id: uid(), name: p[0], maxDay: 0, compact: false, av: {} }; D.teachers.push(t); }
     const h = +(p[3].match(/\d+/) || [0])[0]; if (!h) { bad.push(raw); return; }
-    const o = { blk: 1, pref: '', noRoom: false, grp: '' }, ex = p.slice(4).map(nz);
-    ex.forEach(e => { if (/^bloc/.test(e)) o.blk = 2; else if (/^matin/.test(e)) o.pref = 'M'; else if (/^apres/.test(e)) o.pref = 'A'; else if (/sans salle/.test(e)) o.noRoom = true; else if (/^groupe/.test(e)) o.grp = p.slice(4).find(x => nz(x).startsWith('groupe')).replace(/^groupe\s*[:=]?\s*/i, ''); });
+    const o = { blk: 1, pref: '', noRoom: false, grp: '', gl: '' }, ex = p.slice(4).map(nz);
+    ex.forEach(e => { if (/^bloc/.test(e)) o.blk = 2; else if (/^matin/.test(e)) o.pref = 'M'; else if (/^apres/.test(e)) o.pref = 'A'; else if (/sans salle/.test(e)) o.noRoom = true; else if (/^groupe/.test(e)) o.grp = p.slice(4).find(x => nz(x).startsWith('groupe')).replace(/^groupe\s*[:=]?\s*/i, ''); else if (/^libelle/.test(e)) o.gl = p.slice(4).find(x => nz(x).startsWith('libelle')).replace(/^libell[ée]\s*[:=]?\s*/i, ''); });
     const names = /^tout/i.test(p[2]) ? D.classes.map(c => c.name) : p[2].split(',').map(s => s.trim());
     names.forEach(cn => { const c = D.classes.find(x => nz(x.name) === nz(cn)); if (!c) { bad.push(raw + ' (classe « ' + cn + ' » inconnue)'); return; } D.lessons.push(Object.assign({ id: uid(), t: t.id, subj: p[1], c: c.id, h }, o, { grp: o.grp ? (o.grp.endsWith('*') ? o.grp.slice(0, -1).trim() + ' ' + c.name : o.grp) : '' })); n++; });
   });
@@ -1103,9 +1163,16 @@ function cellMap(kind, id, P, res) {
 }
 function partsHTML(kind, id, c, P) {
   const { x, e } = c; let ps = x.parts;
-  if (kind === 'class') { const f = ps.filter(p => p.c === id); if (f.length) ps = f; } else if (kind === 'teacher') ps = ps.filter(p => p.t === id); else if (kind === 'room') ps = ps.filter(p => e.rooms[p.lid] === id);
+  ps = partsFor(kind, id, ps, e);
   const rn = r => { const o = D.rooms.find(z => z.id === r); return o ? o.name : ''; };
-  return ps.map(p => `<div class="pt"><b>${esc(p.subj)}</b>` + (kind === 'class' ? `<br>${esc(P.tch[p.t].name)}` : `<br>${esc(P.cls[p.c].name)}`) + (kind === 'teacher' || kind === 'class' ? (e.rooms[p.lid] ? `<br><i>${esc(rn(e.rooms[p.lid]))}</i>` : '') : `<br>${esc(P.tch[p.t].name)}`) + '</div>').join('');
+  return ps.map(p => `<div class="pt">${p.lab && x.parts.length > 1 ? `<span class="gl">${esc(p.lab)}</span>` : ''}<b>${esc(p.subj)}</b>` + (kind === 'class' ? `<br>${esc(P.tch[p.t].name)}` : `<br>${esc(csName(p, P))}`) + (kind === 'teacher' || kind === 'class' ? (e.rooms[p.lid] ? `<br><i>${esc(rn(e.rooms[p.lid]))}</i>` : '') : `<br>${esc(P.tch[p.t].name)}`) + '</div>').join('');
+}
+const pcs = p => p.cs || [p.c];
+const csName = (p, P) => pcs(p).map(c => P.cls[c].name).join(' + ');
+function partsFor(kind, id, ps, e) {
+  if (kind === 'class') { const f = ps.filter(p => pcs(p).includes(id)); return f.length ? f : ps; }
+  if (kind === 'teacher') return ps.filter(p => p.t === id);
+  return ps.filter(p => e.rooms[p.lid] === id);
 }
 function ttHTML(kind, id, P, res, pr) {
   const m = cellMap(kind, id, P, res), on = D.days.map((d, i) => d.on ? i : -1).filter(i => i >= 0), skip = {};
@@ -1186,10 +1253,10 @@ function pdfPage(doc, kind, x, P, res) {
       if (!c) { doc.setFillColor(255, 255, 255); doc.rect(cx, y, colW, rowH, 'FD'); return; }
       if (!c.first) return; for (let k = 1; k < c.x.len; k++) skip[kk(d, s + k)] = 1;
       const h = rowH * c.x.len; doc.setFillColor(...rgbOf(c.x.parts[0].subj)); doc.rect(cx, y, colW, h, 'FD');
-      let ps = c.x.parts; if (kind === 'class') { const f = ps.filter(p => p.c === x.id); if (f.length) ps = f; } else if (kind === 'teacher') ps = ps.filter(p => p.t === x.id); else ps = ps.filter(p => c.e.rooms[p.lid] === x.id);
+      const ps = partsFor(kind, x.id, c.x.parts, c.e), showLab = c.x.parts.length > 1;
       const rn = r => { const o = D.rooms.find(z => z.id === r); return o ? o.name : ''; };
       let fs = 8, lines;
-      const build = () => { lines = []; doc.setFontSize(fs); ps.forEach((p, pi) => { if (pi) lines.push({ t: '- - -', b: 0 }); doc.setFont('helvetica', 'bold'); doc.splitTextToSize(p.subj, colW - 3).forEach(t => lines.push({ t, b: 1 })); doc.setFont('helvetica', 'normal'); const sec = kind === 'class' ? P.tch[p.t].name : P.cls[p.c].name, thr = (kind === 'teacher' || kind === 'class') ? (c.e.rooms[p.lid] ? rn(c.e.rooms[p.lid]) : '') : P.tch[p.t].name; [sec, thr].filter(Boolean).forEach(t => doc.splitTextToSize(t, colW - 3).forEach(u => lines.push({ t: u, b: 0 }))); }); };
+      const build = () => { lines = []; doc.setFontSize(fs); ps.forEach((p, pi) => { if (pi) lines.push({ t: '- - -', b: 0 }); doc.setFont('helvetica', 'bold'); doc.splitTextToSize((showLab && p.lab ? p.lab + ' : ' : '') + p.subj, colW - 3).forEach(t => lines.push({ t, b: 1 })); doc.setFont('helvetica', 'normal'); const sec = kind === 'class' ? P.tch[p.t].name : csName(p, P), thr = (kind === 'teacher' || kind === 'class') ? (c.e.rooms[p.lid] ? rn(c.e.rooms[p.lid]) : '') : P.tch[p.t].name; [sec, thr].filter(Boolean).forEach(t => doc.splitTextToSize(t, colW - 3).forEach(u => lines.push({ t: u, b: 0 }))); }); };
       build(); while (lines.length * fs * 0.42 > h - 2 && fs > 5) { fs -= 0.5; build(); }
       const lh = fs * 0.42, y0 = y + h / 2 - (lines.length * lh) / 2 + lh * 0.75; doc.setTextColor(20);
       lines.forEach((ln, i) => { doc.setFont('helvetica', ln.b ? 'bold' : 'normal'); doc.setFontSize(fs); doc.text(ln.t, cx + colW / 2, y0 + i * lh, { align: 'center' }); });
@@ -1209,9 +1276,9 @@ async function pdfView(kind, all) {
   await saveFile(nm, doc.output('datauristring').split(',')[1], 'application/pdf', true);
 }
 function exportCSV() {
-  const P = curP(), res = D.res; if (!res) return; const byS = new Map(P.S.map(x => [x.id, x])), rows = [['Classe', 'Jour', 'Horaire', 'Matière', 'Enseignant', 'Salle']];
-  res.pl.forEach(e => { const x = byS.get(e.sid); if (!x) return; for (let k = 0; k < x.len; k++) x.parts.forEach(p => { const r = D.rooms.find(z => z.id === e.rooms[p.lid]); rows.push([P.cls[p.c].name, D.days[e.d].n, D.slots[e.s + k].l, p.subj, P.tch[p.t].name, r ? r.name : '']); }); });
-  rows.slice(1).sort((a, b) => a[0].localeCompare(b[0]) || D.days.findIndex(d => d.n === a[1]) - D.days.findIndex(d => d.n === b[1]) || a[2].localeCompare(b[2]));
+  const P = curP(), res = D.res; if (!res) return; const byS = new Map(P.S.map(x => [x.id, x])), rows = [['Classe', 'Jour', 'Horaire', 'Matière', 'Groupe', 'Enseignant', 'Salle']];
+  res.pl.forEach(e => { const x = byS.get(e.sid); if (!x) return; for (let k = 0; k < x.len; k++) x.parts.forEach(p => { const r = D.rooms.find(z => z.id === e.rooms[p.lid]); pcs(p).forEach(c => rows.push([P.cls[c].name, D.days[e.d].n, D.slots[e.s + k].l, p.subj, x.parts.length > 1 ? (p.lab || '') : '', P.tch[p.t].name, r ? r.name : ''])); }); });
+  const body = rows.slice(1).sort((a, b) => a[0].localeCompare(b[0]) || D.days.findIndex(d => d.n === a[1]) - D.days.findIndex(d => d.n === b[1]) || a[2].localeCompare(b[2])); rows.length = 1; rows.push(...body);
   dl('emploi-du-temps.csv', '﻿' + rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(';')).join('\r\n'), 'text/csv');
 }
 window.addEventListener('DOMContentLoaded', () => { init(); if ('serviceWorker' in navigator && !NATIVE() && /^https?:/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => { }); });
