@@ -664,16 +664,16 @@ function makeProblem(E) {
       if (hs.length > 1) warns.push('Groupe « ' + gname + ' » : heures différentes (' + merged.map(p => p.subj + ' ' + p.h + ' h').join(', ') + ') ; ' + hs[0] + ' h en même temps, le reste placé avec les seuls cours concernés.');
     }
     // Tranches d'heures : chaque tranche réunit les cours qui ont encore des heures
-    const levels = [...new Set(merged.map(p => p.h))].sort((a, b) => a - b), segs = []; let prev = 0;
+    const levels = [...new Set(merged.map(p => p.h))].sort((a, b) => a - b), segs = []; let prev = 0, cut = Math.max(0, ...ls.map(x => +x.cut || 0));
     for (const lv of levels) {
       const parts = merged.filter(p => p.h >= lv).map(p => Object.assign({}, p)), h = lv - prev; prev = lv;
-      const blk = parts[0].blk, n2 = blk === 2 ? Math.floor(h / 2) : 0, rem = h - 2 * n2;
+      const blk = parts[0].blk; let n2 = blk === 2 ? Math.floor(h / 2) : 0; const cc = Math.min(cut, n2); n2 -= cc; cut -= cc; const rem = h - 2 * n2;
       segs.push({ parts, lens: [...Array(n2).fill(2), ...Array(rem).fill(1)] });
     }
-    const cap = Math.max(1, Math.ceil(segs.reduce((a, g) => a + g.lens.length, 0) / nOpen)); let i = 0;
+    const cap = Math.max(1, Math.ceil(segs.reduce((a, g) => a + g.lens.length, 0) / nOpen)), cuts = Math.max(0, ...ls.map(x => +x.cut || 0)); let i = 0;
     for (const g of segs) {
       const classes = [...new Set(g.parts.flatMap(p => p.cs))], teachers = [...new Set(g.parts.map(p => p.t))];
-      g.lens.forEach(len => S.push({ id: key + '#' + (i++), ck: key, len, classes, teachers, parts: g.parts, pref, bans, cap }));
+      g.lens.forEach(len => S.push({ id: key + '#' + (i++), ck: key, len, classes, teachers, parts: g.parts, pref, bans, cap, cut: cuts > 0, h2: merged.some(p => p.blk === 2 && p.h >= 2) }));
     }
   }
   return { E, nd, ns, openDay, closed, S, cls, tch, warns, starts: E.slots.map(s => slotStart(s.l)) };
@@ -714,7 +714,7 @@ function createSolver(P) {
   const pl = new Array(S.length).fill(null), locked = new Array(S.length).fill(false), ej = new Int32Array(S.length);
   const idx = new Map(S.map((x, i) => [x.id, i]));
 
-  function why(i, d, s) {
+  function why(i, d, s, manual) {
     const x = S[i];
     if (!P.openDay[d]) return 'jour fermé';
     if (x.bans.has(d)) return 'jour exclu pour cette matière';
@@ -726,7 +726,7 @@ function createSolver(P) {
       for (const t of x.teachers) if (avm[t][kk(d, s + k)] === 1) return 'enseignant indisponible';
     }
     for (const t of x.teachers) { const m = maxDay[t]; if (m && tDay[t][d] + x.len > m) return 'limite d\'heures par jour de l\'enseignant'; }
-    if (cd[x.ck][d] >= x.cap) return 'cours déjà placé ce jour-là';
+    if (!manual && cd[x.ck][d] >= x.cap) return 'cours déjà placé ce jour-là';
     return null;
   }
   function conf(i, d, s) {
@@ -857,7 +857,7 @@ function createSolver(P) {
   function load(list) {
     list.forEach(e => {
       const i = idx.get(e.sid); if (i == null || pl[i]) return; const x = S[i];
-      if (why(i, e.d, e.s)) return; const b = e.d * ns + e.s; let okc = true;
+      if (why(i, e.d, e.s, true)) return; const b = e.d * ns + e.s; let okc = true;
       const rooms = x.parts.map(p => e.rooms && e.rooms[p.lid] || null);
       for (let k = 0; k < x.len && okc; k++) { for (const c of x.classes) if (cg[c][b + k] >= 0) okc = false; for (const t of x.teachers) if (tg[t][b + k] >= 0) okc = false; rooms.forEach(r => { if (r && (!rg[r] || rg[r][b + k] >= 0)) okc = false; }); }
       if (!okc) return;
@@ -873,15 +873,15 @@ function createSolver(P) {
     const o = pl[i]; if (o && o.d === d && o.s === s) return { ok: true };
     if (o) unplace(i);
     const back = () => { if (o) place(i, o.d, o.s, o.rooms); };
-    const w = why(i, d, s); if (w) { back(); return { ok: false, msg: 'Impossible : ' + w + '.' }; }
+    const w = why(i, d, s, true); if (w) { back(); return { ok: false, msg: 'Impossible : ' + w + '.' }; }
     const cf = conf(i, d, s);
     if (cf && !cf.set.length) { place(i, d, s, cf.rooms); return { ok: true, msg: 'Cours déplacé.' }; }
     if (o && cf && cf.set.length === 1 && !locked[cf.set[0]] && S[cf.set[0]].len === S[i].len) {
       const j = cf.set[0], oj = pl[j]; unplace(j);
-      const c2 = !why(i, d, s) && conf(i, d, s);
+      const c2 = !why(i, d, s, true) && conf(i, d, s);
       if (c2 && !c2.set.length) {
         place(i, d, s, c2.rooms);
-        const c3 = !why(j, o.d, o.s) && conf(j, o.d, o.s);
+        const c3 = !why(j, o.d, o.s, true) && conf(j, o.d, o.s);
         if (c3 && !c3.set.length) { place(j, o.d, o.s, c3.rooms); return { ok: true, msg: 'Échange effectué.' }; }
         unplace(i);
       }
@@ -1057,7 +1057,7 @@ function tLessons() {
   if (LF && !D.teachers.some(t => t.id === LF)) LF = '';
   const rawO = arr => arr.map(a => `<option value="${a[0]}">${esc(a[1])}</option>`).join(''), TO = rawO(T), CO = rawO(C), pick = (o, cur) => o.replace('value="' + cur + '"', 'value="' + cur + '" selected'), rows = LF ? D.lessons.filter(l => l.t === LF) : D.lessons;
   let h = `<section><h2>Cours à programmer (${rows.length}${LF ? ' sur ' + D.lessons.length : ''})</h2><div class="row"><label>Filtrer par enseignant<select onchange="LF=this.value;render()"><option value="">Tous</option>${opt(T, LF)}</select></label></div><p class="hint"><b>Groupe</b> : les lignes qui portent le même nom de groupe sont programmées en même temps, chacune avec son enseignant et sa propre salle. <b>Libellé</b> : nom du sous-groupe affiché sur l'emploi du temps (vide = « Groupe 1 », « Groupe 2 »…). <b>Bloc 2</b> : cours donnés par séances de 2 h. Pour créer un groupe plus simplement, utilisez la section « Groupes simultanés » plus bas.</p><datalist id="sj">${subs.map(s => `<option value="${esc(s)}">`).join('')}</datalist><div class="sc"><table class="t wide cards"><tr><th>Enseignant</th><th>Matière</th><th>Classe</th><th>H/sem</th><th>Bloc</th><th>Moment</th><th>Groupe</th><th>Libellé</th><th>Sans salle</th><th></th></tr>` +
-    rows.map(l => `<tr><td data-l="Enseignant"><select onchange="U('lessons','${l.id}','t',this.value)">${pick(TO, l.t)}</select></td><td data-l="Matière"><input list="sj" value="${esc(l.subj)}" onchange="U('lessons','${l.id}','subj',this.value)"></td><td data-l="Classe"><select onchange="U('lessons','${l.id}','c',this.value)">${pick(CO, l.c)}</select></td><td data-l="Heures / sem"><input type="number" min="1" max="12" class="n" value="${l.h}" onchange="U('lessons','${l.id}','h',this.value,1)"></td><td data-l="Bloc"><select onchange="U('lessons','${l.id}','blk',+this.value)">${opt([[1, '1 h'], [2, '2 h']], +l.blk)}</select></td><td data-l="Moment"><select onchange="U('lessons','${l.id}','pref',this.value)">${opt([['', 'Indifférent'], ['M', 'Matin'], ['A', 'Après-midi']], l.pref || '')}</select></td><td data-l="Groupe"><input value="${esc(l.grp || '')}" onchange="U('lessons','${l.id}','grp',this.value)"></td><td data-l="Libellé"><input value="${esc(l.gl || '')}" placeholder="auto" onchange="U('lessons','${l.id}','gl',this.value)"></td><td data-l="Sans salle"><input type="checkbox" ${l.noRoom ? 'checked' : ''} onchange="U('lessons','${l.id}','noRoom',this.checked)"></td><td data-l=""><button class="x" onclick="D.lessons=D.lessons.filter(x=>x.id!=='${l.id}');sv();render()">✕</button></td></tr>`).join('') +
+    rows.map(l => `<tr><td data-l="Enseignant"><select onchange="U('lessons','${l.id}','t',this.value)">${pick(TO, l.t)}</select></td><td data-l="Matière"><input list="sj" value="${esc(l.subj)}" onchange="U('lessons','${l.id}','subj',this.value)"></td><td data-l="Classe"><select onchange="U('lessons','${l.id}','c',this.value)">${pick(CO, l.c)}</select></td><td data-l="Heures / sem"><input type="number" min="1" max="12" class="n" value="${l.h}" onchange="U('lessons','${l.id}','h',this.value,1)"></td><td data-l="Bloc"><select onchange="U('lessons','${l.id}','cut',0);U('lessons','${l.id}','blk',+this.value)">${opt([[1, '1 h'], [2, '2 h']], +l.blk)}</select></td><td data-l="Moment"><select onchange="U('lessons','${l.id}','pref',this.value)">${opt([['', 'Indifférent'], ['M', 'Matin'], ['A', 'Après-midi']], l.pref || '')}</select></td><td data-l="Groupe"><input value="${esc(l.grp || '')}" onchange="U('lessons','${l.id}','grp',this.value)"></td><td data-l="Libellé"><input value="${esc(l.gl || '')}" placeholder="auto" onchange="U('lessons','${l.id}','gl',this.value)"></td><td data-l="Sans salle"><input type="checkbox" ${l.noRoom ? 'checked' : ''} onchange="U('lessons','${l.id}','noRoom',this.checked)"></td><td data-l=""><button class="x" onclick="D.lessons=D.lessons.filter(x=>x.id!=='${l.id}');sv();render()">✕</button></td></tr>`).join('') +
     `</table></div><div class="btns"><button onclick="addLesson()">+ Cours</button></div></section>`;
   h += groupsHTML();
   h += `<section><h2>Ajout rapide</h2><p class="hint">Une ligne par cours : <code>Enseignant; Matière; Classes; Heures</code>, puis au besoin <code>bloc2</code>, <code>matin</code>, <code>après-midi</code>, <code>groupe=LV2*</code> (l'étoile crée un groupe distinct par classe), <code>libellé=Groupe 1</code>, <code>sans salle</code>. Classes : noms séparés par des virgules, ou « toutes ».</p><textarea id="qa" rows="5" placeholder="M. Diop; Maths; 6ème A, 6ème B; 4; matin&#10;M. Diallo; EPS; toutes; 2; sans salle"></textarea><div class="btns"><button onclick="quickAdd()">Ajouter ces cours</button></div></section>`;
@@ -1150,6 +1150,64 @@ function CC(d, s, ei) {
   const out = withSolver(s2 => { const i = s2.idx.get(SEL); if (i == null) return { ok: false, msg: 'Cours introuvable' }; return s2.move(i, d, s); });
   toast(out.msg || (out.ok ? 'Cours déplacé' : 'Déplacement impossible'), !out.ok); if (out.ok) SEL = null; render();
 }
+/* ---------- Couper / recoller des séances déjà placées ---------- */
+const clLessons = ck => D.lessons.filter(l => (l.grp && l.grp.trim() ? 'g:' + nz(l.grp) : 'l:' + l.id) === ck);
+const pkOf = x => x.ck + '|' + x.parts.map(p => p.lid).join(',') + '|';
+// Reconstruit le résultat après un changement de découpage, sans recalculer : chaque séance garde sa place.
+function rebuildRes(oldP, edit) {
+  const res = D.res, oldSig = sig(), wasFresh = res.sig === oldSig, oldBy = new Map(oldP.S.map(x => [x.id, x])), pool = new Map();
+  const put = (k, e) => { if (!pool.has(k)) pool.set(k, []); pool.get(k).push(e); };
+  res.pl.forEach(e => { const x = oldBy.get(e.sid); if (x) put(pkOf(x) + x.len, Object.assign({}, e)); });
+  edit(pool, put);
+  return () => {
+    const P = curP(), pl = [], un = [];
+    P.S.forEach(x => { const q = pool.get(pkOf(x) + x.len), e = q && q.shift(); if (e) pl.push(Object.assign({}, e, { sid: x.id, len: x.len })); else un.push({ sid: x.id, why: 'à replacer après découpage' }); });
+    D.res = { pl, un, sig: wasFresh ? sig() : res.sig }; SEL = null; sv(); return un.length;
+  };
+}
+const splitIn = (pool, put, k, e) => { const q = pool.get(k + 2) || []; const i = q.indexOf(e); if (i < 0) return; q.splice(i, 1); put(k + 1, Object.assign({}, e, { len: 1 })); put(k + 1, Object.assign({}, e, { s: e.s + 1, len: 1 })); };
+function cutSel() {
+  const P = curP(), x = P.S.find(z => z.id === SEL); if (!x || x.len !== 2) return;
+  const fin = rebuildRes(P, (pool, put) => { const k = pkOf(x), e = (pool.get(k + 2) || []).find(z => z.sid === x.id); if (e) splitIn(pool, put, k, e); });
+  clLessons(x.ck).forEach(l => l.cut = (+l.cut || 0) + 1);
+  const n = fin(); render(); toast(n ? 'Séance coupée ; ' + n + ' séance(s) à replacer' : 'Séance coupée en 2 × 1 h, à la même place', n > 0);
+}
+function joinSel() {
+  const P = curP(), x = P.S.find(z => z.id === SEL), e = x && D.res.pl.find(z => z.sid === SEL); if (!x || !e) return;
+  const k = pkOf(x), mates = P.S.filter(y => pkOf(y) === k && y.len === 1 && y.id !== x.id).map(y => D.res.pl.find(z => z.sid === y.id)).filter(Boolean);
+  const m = mates.find(z => z.d === e.d && Math.abs(z.s - e.s) === 1 && JSON.stringify(z.rooms) === JSON.stringify(e.rooms));
+  if (!m) { toast('Placez d\'abord une autre séance d\'1 h de ce cours juste avant ou après celle-ci, le même jour et dans la même salle', 1); return; }
+  const s0 = Math.min(e.s, m.s);
+  if (!(D.slots[s0].p === D.slots[s0 + 1].p && !D.slots[s0].br)) { toast('Impossible : une pause ou un changement de demi-journée sépare les deux heures', 1); return; }
+  const fin = rebuildRes(P, (pool, put) => { const q = pool.get(k + 1) || []; const a = q.find(z => z.sid === e.sid), b = q.find(z => z.sid === m.sid); pool.set(k + 1, q.filter(z => z !== a && z !== b)); put(k + 2, Object.assign({}, a, { s: s0, len: 2, locked: a.locked || b.locked })); });
+  clLessons(x.ck).forEach(l => l.cut = Math.max(0, (+l.cut || 0) - 1));
+  const n = fin(); render(); toast(n ? 'Séances recollées ; ' + n + ' séance(s) à replacer' : 'Séances recollées en 2 h', n > 0);
+}
+function cutToolHTML(P) {
+  const subs = [...new Set(P.S.filter(x => x.h2 || x.cut).flatMap(x => x.parts.map(p => p.subj)))].sort((a, b) => a.localeCompare(b));
+  if (!subs.length) return '';
+  return `<section><h2>Séances de 2 h</h2><p class="hint">Couper une séance de 2 h en deux séances d'1 h, <b>sans régénérer</b> : les deux heures restent à la même place et vous pouvez ensuite déplacer l'une d'elles. Pour une seule séance : touchez-la dans l'emploi du temps puis « Couper en 2 × 1 h ». Le découpage est gardé lors des prochaines générations.</p><div class="row"><label>Discipline<select id="cutsub"><option value="*">Toutes les disciplines</option>${subs.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select></label></div><div class="btns"><button onclick="cutSubject($('cutsub').value)">Couper toutes ses séances de 2 h</button><button class="sec" onclick="joinSubject($('cutsub').value)">Rétablir les séances de 2 h</button></div></section>`;
+}
+const hasSub = (x, sub) => sub === '*' || x.parts.some(p => nz(p.subj) === nz(sub));
+function cutSubject(sub) {
+  const P = curP(), xs = P.S.filter(x => x.len === 2 && hasSub(x, sub)); if (!xs.length) { toast('Aucune séance de 2 h pour cette discipline'); return; }
+  const cks = new Set(xs.map(x => x.ck));
+  const fin = rebuildRes(P, (pool, put) => xs.forEach(x => { const k = pkOf(x), e = (pool.get(k + 2) || []).find(z => z.sid === x.id); if (e) splitIn(pool, put, k, e); }));
+  cks.forEach(ck => { const n = xs.filter(x => x.ck === ck).length; clLessons(ck).forEach(l => l.cut = (+l.cut || 0) + n); });
+  const n = fin(); render(); toast(xs.length + ' séance(s) de 2 h coupée(s)' + (n ? ' ; ' + n + ' à replacer' : ', places conservées'), n > 0);
+}
+function joinSubject(sub) {
+  const P = curP(), cks = new Set(P.S.filter(x => x.cut && hasSub(x, sub)).map(x => x.ck)); if (!cks.size) { toast('Aucune séance coupée pour cette discipline'); return; }
+  const fin = rebuildRes(P, (pool, put) => {
+    const ks = new Set(P.S.filter(x => cks.has(x.ck)).map(pkOf));
+    ks.forEach(k => { const q = (pool.get(k + 1) || []).sort((a, b) => a.d - b.d || a.s - b.s), keep = [];
+      for (let i = 0; i < q.length; i++) { const a = q[i], b = q[i + 1];
+        if (b && a.d === b.d && b.s === a.s + 1 && D.slots[a.s].p === D.slots[b.s].p && !D.slots[a.s].br && JSON.stringify(a.rooms) === JSON.stringify(b.rooms)) { put(k + 2, Object.assign({}, a, { len: 2, locked: a.locked || b.locked })); i++; } else keep.push(a); }
+      pool.set(k + 1, keep); });
+  });
+  cks.forEach(ck => clLessons(ck).forEach(l => l.cut = 0));
+  const n = fin(); render(); toast(n ? 'Séances de 2 h rétablies ; ' + n + ' séance(s) à replacer (Régénérer ou « Placer à la main »)' : 'Séances de 2 h rétablies', n > 0);
+}
 function toggleLock() { const e = D.res.pl.find(x => x.sid === SEL); if (e) { e.locked = !e.locked; sv(); } render(); }
 const colorOf = s => { let h = 0; const t = nz(s); for (let i = 0; i < t.length; i++) h = (h * 37 + t.charCodeAt(i)) % 360; return `hsl(${h},65%,${88}%)`; };
 function cellMap(kind, id, P, res) {
@@ -1210,10 +1268,11 @@ function tTT() {
   const list = VIEW.kind === 'class' ? D.classes : VIEW.kind === 'teacher' ? D.teachers : D.rooms;
   if (VIEW.kind !== 'all' && !list.some(x => x.id === VIEW.id)) VIEW.id = list[0] ? list[0].id : '';
   h += `<section><h2>Emploi du temps</h2><div class="row"><label>Vue<select onchange="VIEW.kind=this.value;VIEW.id='';SEL=null;render()">${ks.map(k => `<option value="${k[0]}" ${VIEW.kind === k[0] ? 'selected' : ''}>${k[1]}</option>`).join('')}</select></label>${VIEW.kind !== 'all' ? `<label>&nbsp;<select onchange="VIEW.id=this.value;SEL=null;render()">${list.map(x => `<option value="${x.id}" ${VIEW.id === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label>` : ''}</div>`;
-  if (SEL) { const x = P.S.find(z => z.id === SEL); const e = res.pl.find(z => z.sid === SEL); h += `<div class="selbar"><span>Sélection : <b>${x ? esc(x.parts.map(p => p.subj).join('/')) : ''}</b> ${x ? esc(x.classes.map(c => P.cls[c].name).join('+')) : ''}${e ? '' : ' (non placé)'} → touchez une case pour y déplacer ou échanger.</span>${e ? `<button class="sm" onclick="toggleLock()">${e.locked ? 'Déverrouiller' : 'Verrouiller'}</button>` : ''}<button class="sm sec" onclick="SEL=null;render()">Annuler</button></div>`; }
+  if (SEL) { const x = P.S.find(z => z.id === SEL); const e = res.pl.find(z => z.sid === SEL); h += `<div class="selbar"><span>Sélection : <b>${x ? esc(x.parts.map(p => p.subj).join('/')) : ''}</b> ${x ? esc(x.classes.map(c => P.cls[c].name).join('+')) : ''}${e ? '' : ' (non placé)'} → touchez une case pour y déplacer ou échanger.</span>${e ? `<button class="sm" onclick="toggleLock()">${e.locked ? 'Déverrouiller' : 'Verrouiller'}</button>` : ''}${e && x && x.len === 2 ? '<button class="sm" onclick="cutSel()">Couper en 2 × 1 h</button>' : ''}${e && x && x.len === 1 && x.cut ? '<button class="sm sec" onclick="joinSel()">Recoller en 2 h</button>' : ''}<button class="sm sec" onclick="SEL=null;render()">Annuler</button></div>`; }
   else h += '<p class="hint">Touchez un cours pour le sélectionner, puis une case libre (ou un autre cours) pour le déplacer ou l\'échanger. Le logiciel refuse tout déplacement qui crée un conflit.</p>';
   h += VIEW.kind === 'all' ? allHTML(P, res) : `<div class="sc">${ttHTML(VIEW.kind, VIEW.id, P, res, false)}</div>`;
   h += `<div class="btns"><button onclick="pdfView('${VIEW.kind === 'all' ? 'class' : VIEW.kind}',false)">PDF de cette vue</button><button class="sec" onclick="pdfView('class',true)">PDF toutes les classes</button><button class="sec" onclick="pdfView('teacher',true)">PDF tous les enseignants</button><button class="sec" onclick="exportCSV()">Export Excel (CSV)</button><button class="sec" onclick="backup()">Sauvegarde</button></div></section>`;
+  h += cutToolHTML(P);
   h += statsHTML(P, res);
   return h;
 }
